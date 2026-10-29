@@ -1,2 +1,6 @@
+fastapi==0.143.3
+pydantic==2.14.1
 requests==2.34.2
+starlette==1.8.0
 streamlit==1.66.1
+uvicorn==0.54.0
