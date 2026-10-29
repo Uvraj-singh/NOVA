@@ -8,6 +8,7 @@ def get_backend_url() -> str:
     # On Streamlit Cloud, the address comes from the app's Secrets.
     # On your laptop there's no secrets file, so use the local backend.
     try:
+        return st.secrets["BACKEND_URL"].rstrip("/")
     except Exception:
         return "http://127.0.0.1:8000"
 
