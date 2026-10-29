@@ -1,0 +1,10 @@
+﻿icml_face_data.csv
+icml_face_data.csv.zip
+Challenges in Representation*
+vertual env/
+myven/
+venv/
+.env
+__pycache__/
+*.pyc
+*.wav
