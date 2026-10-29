@@ -9,18 +9,20 @@ from pydantic import BaseModel
 
 app = FastAPI(title="NOVA")
 
-# "ollama" runs locally (default). "groq" is used on the cloud host.
+# Text model: "ollama" (local, default) or "groq" (cloud).
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+# Voice engine: "local" (pyttsx3 + faster-whisper, default) or "groq" (cloud).
+VOICE_PROVIDER = os.getenv("VOICE_PROVIDER", "local")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:latest"
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_BASE = "https://api.groq.com/openai/v1"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
-# Voice needs local audio packages, so it is off on the cloud host.
-ENABLE_VOICE = os.getenv("ENABLE_VOICE", "1") == "1"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+GROQ_TTS_MODEL = "canopylabs/orpheus-v1-english"
+GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "troy")
 
 AUDIO_DIR = Path("audio")
 AUDIO_DIR.mkdir(exist_ok=True)
@@ -65,6 +67,22 @@ def build_prompt(req: ChatRequest) -> str:
     )
 
 
+def groq_post(path: str, **kwargs) -> requests.Response:
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not set")
+    r = requests.post(
+        f"{GROQ_BASE}{path}",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        timeout=120,
+        **kwargs,
+    )
+    if r.status_code >= 400:
+        raise HTTPException(
+            status_code=502, detail=f"Groq error {r.status_code}: {r.text[:200]}"
+        )
+    return r
+
+
 def ask_ollama(prompt: str) -> str:
     r = requests.post(
         OLLAMA_URL,
@@ -76,18 +94,10 @@ def ask_ollama(prompt: str) -> str:
 
 
 def ask_groq(prompt: str) -> str:
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not set")
-    r = requests.post(
-        GROQ_URL,
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        json={
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=120,
+    r = groq_post(
+        "/chat/completions",
+        json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}]},
     )
-    r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
 
@@ -103,15 +113,27 @@ def chat(req: ChatRequest):
 
 @app.post("/speak")
 def speak(req: SpeakRequest):
-    if not ENABLE_VOICE:
-        raise HTTPException(status_code=503, detail="Voice is disabled on this server")
-    import pyttsx3
-
     filename = f"{uuid.uuid4().hex}.wav"
     path = AUDIO_DIR / filename
-    engine = pyttsx3.init()
-    engine.save_to_file(req.text, str(path))
-    engine.runAndWait()
+
+    if VOICE_PROVIDER == "groq":
+        r = groq_post(
+            "/audio/speech",
+            json={
+                "model": GROQ_TTS_MODEL,
+                "input": req.text,
+                "voice": GROQ_TTS_VOICE,
+                "response_format": "wav",
+            },
+        )
+        path.write_bytes(r.content)
+    else:
+        import pyttsx3
+
+        engine = pyttsx3.init()
+        engine.save_to_file(req.text, str(path))
+        engine.runAndWait()
+
     return {"audio_url": f"/audio/{filename}"}
 
 
@@ -137,11 +159,20 @@ def get_stt_model():
 
 @app.post("/transcribe")
 def transcribe(audio: UploadFile = File(...)):
-    if not ENABLE_VOICE:
-        raise HTTPException(status_code=503, detail="Voice is disabled on this server")
     tmp = AUDIO_DIR / f"{uuid.uuid4().hex}_in.wav"
     tmp.write_bytes(audio.file.read())
-    segments, _ = get_stt_model().transcribe(str(tmp))
-    text = " ".join(seg.text.strip() for seg in segments)
-    tmp.unlink(missing_ok=True)
+    try:
+        if VOICE_PROVIDER == "groq":
+            with open(tmp, "rb") as f:
+                r = groq_post(
+                    "/audio/transcriptions",
+                    files={"file": (tmp.name, f, "audio/wav")},
+                    data={"model": GROQ_STT_MODEL, "response_format": "json"},
+                )
+            text = r.json()["text"]
+        else:
+            segments, _ = get_stt_model().transcribe(str(tmp))
+            text = " ".join(seg.text.strip() for seg in segments)
+    finally:
+        tmp.unlink(missing_ok=True)
     return {"text": text}
